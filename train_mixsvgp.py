@@ -6,18 +6,27 @@ from MixtureSVGP import MixtureSVGP, generate_updates
 import pickle
 from utils import load_data
 
+import sys, os
 
-n_iters = 4
+out_dir = sys.argv[1]
+model_id = sys.argv[2]
+
+if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
+
+model_path = out_dir + 'model_' + model_id
+
+n_iters = 1000
 normalized_data_df, X, data_dict = load_data(
     'data/quantile_normalized_no_projection.txt')
 n_lines, n_samples, n_genes = X.shape
 y = X.transpose(0, 2, 1)
 
-N = 5
-G = 200
-K = 2
-L = 4
-T = 16
+N = n_lines
+G = 100
+K = 3
+L = 5
+T = n_samples
 
 y = y[:N, :G, :]
 X = np.tile(np.arange(T).astype(np.float64), (N, G, 1))
@@ -39,7 +48,7 @@ assignments = np.random.choice(L, G)
 for l in range(L):
     Lambda[assignments == l, l] = 1.0
 
-Gamma = np.tile(np.array([0.9, 0.1]), (L, 1))
+Gamma = np.tile(np.array([0.3, 0.7]), (L, 1))
 
 num_clusters = (K + 1) * L
 mask = ~np.isnan(y.reshape(-1, 1)).squeeze()
@@ -68,7 +77,10 @@ for _ in range(n_iters):
     Phi, Lambda, Gamma = update_assignments(
         m, X, y, pi, psi, rho, Phi, Lambda, Gamma)
 
+    pi = Phi.sum(axis=0) / Phi.sum()
+    psi = Lambda.sum(axis=0) / Lambda.sum()
+
     params = {'pi': pi, 'psi': psi, 'rho': rho,
               'Phi': Phi, 'Lambda': Lambda, 'Gamma': Gamma}
-    with open(out_path, 'wb') as f:
+    with open(model_path, 'wb') as f:
         pickle.dump([m.read_trainables(), params], f)

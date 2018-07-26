@@ -22,9 +22,9 @@ def make_gp_funs(cov_func, num_cov_params=1):
         """Returns the predictive mean and covariance at locations xstar,
            of the latent function value f (without observation noise)."""
         mean, cov_params, noise_variance = unpack_kernel_params(params)
-        cov_f_f = rbf_covariance(cov_params, xstar, xstar)
-        cov_y_f = rbf_covariance(cov_params, x, xstar)
-        cov_y_y = rbf_covariance(cov_params, x, x) + \
+        cov_f_f = cov_func(cov_params, xstar, xstar)
+        cov_y_f = cov_func(cov_params, x, xstar)
+        cov_y_y = cov_func(cov_params, x, x) + \
             np.diag(noise_variance / weights)
 
         z = solve(cov_y_y, cov_y_f).T
@@ -54,18 +54,18 @@ def make_gp_funs(cov_func, num_cov_params=1):
         if n == 0:
             # no data, return the prior
             prior_mean = mean * np.ones(xstar.size)
-            prior_covariance = rbf_covariance(cov_params, xstar, xstar)
+            prior_covariance = cov_func(cov_params, xstar, xstar)
             return prior_mean, prior_covariance
 
         y_bar = np.dot(weights, y)
         weights_full = (np.logical_not(np.isnan(y)) *
                         weights[:, np.newaxis]).sum(axis=0)
 
-        cov_f_f = rbf_covariance(cov_params, xstar, xstar)
-        cov_y_f = weights_full[:, np.newaxis] * rbf_covariance(cov_params, x, xstar)
+        cov_f_f = cov_func(cov_params, xstar, xstar)
+        cov_y_f = weights_full[:, np.newaxis] * cov_func(cov_params, x, xstar)
 
         cov_y_y = np.outer(weights_full, weights_full) * \
-            rbf_covariance(cov_params, x, x) + \
+            cov_func(cov_params, x, x) + \
             noise_variance * np.diag(weights_full)
 
         z = solve(cov_y_y, cov_y_f).T
