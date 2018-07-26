@@ -14,8 +14,6 @@ model_id = sys.argv[2]
 if not os.path.exists(out_dir):
     os.makedirs(out_dir)
 
-model_path = out_dir + 'model_' + model_id
-
 n_iters = 1000
 normalized_data_df, X, data_dict = load_data(
     'data/quantile_normalized_no_projection.txt')
@@ -23,11 +21,14 @@ n_lines, n_samples, n_genes = X.shape
 y = X.transpose(0, 2, 1)
 
 N = n_lines
-G = 100
+G = n_genes
 K = 3
-L = 5
+L = 100
 T = n_samples
 
+
+model_path = out_dir + 'mixsvgp_K' + str(K) + '_L' + str(L) + '_' + model_id
+print(model_path)
 y = y[:N, :G, :]
 X = np.tile(np.arange(T).astype(np.float64), (N, G, 1))
 
