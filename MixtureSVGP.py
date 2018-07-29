@@ -71,8 +71,7 @@ class MixtureSVGP(gpflow.models.GPModel):
         """
         mask = ~np.isnan(Y).squeeze()
         X = X[mask]
-        Y = np.broadcast_to(Y[mask], (Y[mask].shape[0], num_clusters))
-
+        Y = Y[mask]
         if minibatch_size is None:
             X = DataHolder(X)
             Y = DataHolder(Y)
@@ -82,7 +81,7 @@ class MixtureSVGP(gpflow.models.GPModel):
 
         # init the super class, accept args
         GPModel.__init__(self, X, Y, kern, likelihood,
-                         mean_function, num_latent, **kwargs)
+                         mean_function, num_latent=num_clusters, **kwargs)
 
         self.mask = mask
 
@@ -93,7 +92,8 @@ class MixtureSVGP(gpflow.models.GPModel):
         # init variational parameters
         num_inducing = len(self.feature)
         self._init_variational_parameters(num_inducing, q_mu, q_sqrt, q_diag)
-        self.weights = tf.placeholder(tf.float64, Y.shape)
+        self.weights = tf.placeholder(tf.float64, [Y.shape[0], num_clusters])
+        self.num_clusters = num_clusters
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -121,16 +121,23 @@ class MixtureSVGP(gpflow.models.GPModel):
             `q_sqrt` is two dimensional and only holds the square root of the
             covariance diagonal elements. If False, `q_sqrt` is three dimensional.
         """
-        q_mu = np.zeros((num_inducing, self.num_latent)) if q_mu is None else q_mu
+        q_mu = np.zeros(
+            (num_inducing, self.num_latent)) if q_mu is None else q_mu
         self.q_mu = Parameter(q_mu, dtype=settings.float_type)  # M x P
 
         if q_sqrt is None:
             if self.q_diag:
-                self.q_sqrt = Parameter(np.ones((num_inducing, self.num_latent), dtype=settings.float_type),
-                                        transform=transforms.positive)  # M x P
+                self.q_sqrt = Parameter(np.ones(
+                    (num_inducing, self.num_latent),
+                    dtype=settings.float_type),
+                    transform=transforms.positive)  # M x P
             else:
-                q_sqrt = np.array([np.eye(num_inducing, dtype=settings.float_type) for _ in range(self.num_latent)])
-                self.q_sqrt = Parameter(q_sqrt, transform=transforms.LowerTriangular(num_inducing, self.num_latent))  # P x M x M
+                q_sqrt = np.array([np.eye(
+                    num_inducing, dtype=settings.float_type)
+                    for _ in range(self.num_latent)])
+                self.q_sqrt = Parameter(
+                    q_sqrt, transform=transforms.LowerTriangular(
+                        num_inducing, self.num_latent))  # P x M x M
         else:
             if q_diag:
                 assert q_sqrt.ndim == 2
@@ -140,14 +147,17 @@ class MixtureSVGP(gpflow.models.GPModel):
                 assert q_sqrt.ndim == 3
                 self.num_latent = q_sqrt.shape[0]
                 num_inducing = q_sqrt.shape[1]
-                self.q_sqrt = Parameter(q_sqrt, transform=transforms.LowerTriangular(num_inducing, self.num_latent))  # L/P x M x M
+                self.q_sqrt = Parameter(
+                    q_sqrt, transform=transforms.LowerTriangular(
+                        num_inducing, self.num_latent))  # L/P x M x M
 
     @params_as_tensors
     def build_prior_KL(self):
         if self.whiten:
             K = None
         else:
-            K = Kuu(self.feature, self.kern, jitter=settings.numerics.jitter_level)  # (P x) x M x M
+            K = Kuu(self.feature, self.kern,
+                    jitter=settings.numerics.jitter_level)  # (P x) x M x M
 
         return kullback_leiblers.gauss_kl(self.q_mu, self.q_sqrt, K)
 
@@ -168,7 +178,7 @@ class MixtureSVGP(gpflow.models.GPModel):
 
         # Get variational expectations.
         var_exp = self.likelihood.variational_expectations(
-            tf.zeros_like(fmean), fvar, (self.Y - fmean))
+            fmean, fvar, self.Y)
 
         # re-scale for minibatch size
         scale = tf.cast(self.num_data, settings.float_type) / tf.cast(
