@@ -92,8 +92,8 @@ class MixtureSVGP(gpflow.models.GPModel):
         # init variational parameters
         num_inducing = len(self.feature)
         self._init_variational_parameters(num_inducing, q_mu, q_sqrt, q_diag)
-        self.weights = tf.placeholder(tf.float64, [Y.shape[0], num_clusters])
         self.num_clusters = num_clusters
+        self.weights = tf.placeholder(tf.float64, [Y.shape[0], num_clusters])
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -187,13 +187,36 @@ class MixtureSVGP(gpflow.models.GPModel):
         # weights = self._compute_weights()
         return tf.reduce_sum(var_exp * self.weights) * scale - KL
 
+    @gpflow.autoflow((settings.float_type, [None, None]),
+                     (settings.float_type, [None, None]))
+    def expected_density(self, Xnew, Ynew):
+        """
+        This gives a variational bound on the model likelihood.
+        Just compute likelihood for each model and scale each observation
+        by current responsibility estimate
+        """
+        fmean, fvar = self._build_predict(
+            Xnew, full_cov=False, full_output_cov=False)
+
+        # Get variational expectations.
+        var_exp = self.likelihood.variational_expectations(
+            fmean, fvar, Ynew)
+
+        return var_exp
+
     @params_as_tensors
     def _build_predict(self, Xnew, full_cov=False, full_output_cov=False):
-        mu, var = conditional(Xnew, self.feature, self.kern, self.q_mu,
+        Xnew, idx = tf.unique(tf.reshape(Xnew, [-1]))
+        mu, var = conditional(tf.reshape(Xnew, [-1, 1]),
+                              self.feature, self.kern, self.q_mu,
                               q_sqrt=self.q_sqrt, full_cov=full_cov,
                               white=self.whiten,
                               full_output_cov=full_output_cov)
-        return mu + self.mean_function(Xnew), var
+        mu = mu + self.mean_function(Xnew)
+
+        mu = tf.gather(mu, idx, axis=0)
+        var = tf.gather(var, idx, axis=0)
+        return mu, var
 
 
 def generate_updates(N, G, K, L, T):
@@ -206,7 +229,7 @@ def generate_updates(N, G, K, L, T):
             weights[..., None], [K + 1, L, N, G, T]).reshape((K+1)*L, -1).T
 
     def update_assignments(m, X, Y, pi, psi, rho, Phi, Lambda, Gamma):
-        densities = m.predict_density(
+        densities = m.expected_density(
             X.reshape(-1, 1), Y.reshape(-1, 1)).T.reshape(K+1, L, N, G, T)
         for _ in range(10):
             Lambda_old = Lambda.copy()
