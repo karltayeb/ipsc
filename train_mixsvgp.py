@@ -14,11 +14,11 @@ model_id = sys.argv[2]
 if not os.path.exists(out_dir):
     os.makedirs(out_dir)
 
-n_iters = 1000
-normalized_data_df, X, data_dict = load_data(
+n_iters = 10
+normalized_data_df, x, data_dict = load_data(
     'data/quantile_normalized_no_projection.txt')
-n_lines, n_samples, n_genes = X.shape
-y = X.transpose(0, 2, 1)
+n_lines, n_samples, n_genes = x.shape
+y = x.transpose(0, 2, 1)
 
 N = n_lines
 G = n_genes
@@ -26,13 +26,13 @@ K = 3
 L = 100
 T = n_samples
 
-minibatch_size = 100000
+minibatch_size = 10000
 
 
 model_path = out_dir + 'mixsvgp_K' + str(K) + '_L' + str(L) + '_' + model_id
 print(model_path)
 y = y[:N, :G, :]
-X = np.tile(np.arange(T).astype(np.float64), (N, G, 1))
+x = np.tile(np.arange(T).astype(np.float64), (N, G, 1))
 
 
 # initialize mixture weights
@@ -62,7 +62,7 @@ num_data = mask.sum()
 num_clusters = K * L + L
 minibatch_size = np.minimum(num_data, minibatch_size)
 
-X = X.reshape(-1, 1)[mask]
+X = x.reshape(-1, 1)[mask]
 Y = y.reshape(-1, 1)[mask]
 weights = compute_weights(Phi, Lambda, Gamma)
 
@@ -81,14 +81,15 @@ m.feature.feat.Z.trainable = False
 
 # optimize model parameters
 opt = gpflow.train.AdamOptimizer()
-opt.minimize(m, maxiter=1e5)
+opt.minimize(m, maxiter=int(100))
 
 out_path = 'model'
 elbos = [m.compute_log_likelihood()]
 for _ in range(n_iters):
+    print('!!!')
     # update assignments and mixture weights
     Phi, Lambda, Gamma = update_assignments(
-        m, X, y, pi, psi, rho, Phi, Lambda, Gamma)
+        m, x, y, pi, psi, rho, Phi, Lambda, Gamma)
 
     pi = Phi.sum(axis=0) / Phi.sum()
     psi = Lambda.sum(axis=0) / Lambda.sum()
@@ -100,14 +101,14 @@ for _ in range(n_iters):
     weights = compute_weights(Phi, Lambda, Gamma)[mask]
 
     # reassign model data
-    m.X = X.reshape(-1, 1)[mask]
-    m.Y = y.reshape(-1, 1)[mask]
+    m.X = X
+    m.Y = Y
     m.weights = weights
     elbos.append(m.compute_log_likelihood())
 
     # optimize gp parameters
     opt = gpflow.train.AdamOptimizer()
-    opt.minimize(m, maxiter=1e5)
+    opt.minimize(m, maxiter=100)
     elbos.append(m.compute_log_likelihood())
     # save model
     with open(model_path, 'wb') as f:
