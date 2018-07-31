@@ -42,7 +42,8 @@ class MixtureSVGP(gpflow.models.GPModel):
       }
     """
 
-    def __init__(self, X, Y, num_clusters, kern, likelihood,
+    def __init__(self, X, Y, weights, kern, likelihood,
+                 num_clusters,
                  feat=None,
                  mean_function=None,
                  num_latent=None,
@@ -69,21 +70,18 @@ class MixtureSVGP(gpflow.models.GPModel):
         - num_data is the total number of observations, default to X.shape[0]
           (relevant when feeding in external minibatches)
         """
-        mask = ~np.isnan(Y).squeeze()
-        X = X[mask]
-        Y = Y[mask]
         if minibatch_size is None:
             X = DataHolder(X)
             Y = DataHolder(Y)
+            weights = DataHolder(weights)
         else:
             X = Minibatch(X, batch_size=minibatch_size, seed=0)
             Y = Minibatch(Y, batch_size=minibatch_size, seed=0)
+            weights = Minibatch(weights, batch_size=minibatch_size, seed=0)
 
         # init the super class, accept args
         GPModel.__init__(self, X, Y, kern, likelihood,
                          mean_function, num_latent=num_clusters, **kwargs)
-
-        self.mask = mask
 
         self.num_data = num_data or X.shape[0]
         self.q_diag, self.whiten = q_diag, whiten
@@ -92,8 +90,7 @@ class MixtureSVGP(gpflow.models.GPModel):
         # init variational parameters
         num_inducing = len(self.feature)
         self._init_variational_parameters(num_inducing, q_mu, q_sqrt, q_diag)
-        self.num_clusters = num_clusters
-        self.weights = tf.placeholder(tf.float64, [Y.shape[0], num_clusters])
+        self.weights = weights
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -169,10 +166,38 @@ class MixtureSVGP(gpflow.models.GPModel):
         by current responsibility estimate
         """
 
+        """
+        fmean, fvar, input_idx = self._build_predict_condensed(
+            self.X, full_cov=False, full_output_cov=False)
+        Y_parts = tf.dynamic_partition(self.Y, input_idx, self.T)
+        weight_parts = tf.dynamic_partition(self.weights, input_idx, self.T)
+        return tf.reduce_sum(
+        [tf.reduce_sum(self.likelihood.variational_expectations(
+                fmean[t], fvar[t], Y_parts[t]
+            ) * weight_parts[t]) for t in range(self.T)]) - KL
+        fmean, fvar, idx = self._build_predict_condensed(
+            self.X, full_cov=False, full_output_cov=False)
+
+        likelihood = []
+        for k in range(self.K):
+            for l in range(self.L):
+                weights = self.Phi[:, k][None, :] *
+                    self.Lambda[:, l][:, None] * self.Gamma[l, 0]
+                weights = tf.tile(weights[:, :, None], [1, 1, self.T])
+
+                mean = tf.gather(fmean[k * l + l], idx)
+                var = tf.gather(fmean[k * l + l], idx)
+                weights = tf.boolean_mask(
+                    tf.reshape(weights, [-1, 1]), self.mask)
+                var_exp = self.likelihood.variational_expectations(
+                    mean, var, self.Y)
+                likelihood.append(tf.reduce_sum(weights * var_exp))
+        return
+        """
         # Get prior KL.
         KL = self.build_prior_KL()
-        # Get conditionals
 
+        # Get conditionals
         fmean, fvar = self._build_predict(
             self.X, full_cov=False, full_output_cov=False)
 
@@ -206,7 +231,7 @@ class MixtureSVGP(gpflow.models.GPModel):
 
     @params_as_tensors
     def _build_predict(self, Xnew, full_cov=False, full_output_cov=False):
-        Xnew, idx = tf.unique(tf.reshape(Xnew, [-1]))
+        Xnew, input_idx = tf.unique(tf.reshape(Xnew, [-1]))
         mu, var = conditional(tf.reshape(Xnew, [-1, 1]),
                               self.feature, self.kern, self.q_mu,
                               q_sqrt=self.q_sqrt, full_cov=full_cov,
@@ -214,9 +239,20 @@ class MixtureSVGP(gpflow.models.GPModel):
                               full_output_cov=full_output_cov)
         mu = mu + self.mean_function(Xnew)
 
-        mu = tf.gather(mu, idx, axis=0)
-        var = tf.gather(var, idx, axis=0)
+        mu = tf.gather(mu, input_idx, axis=0)
+        var = tf.gather(var, input_idx, axis=0)
         return mu, var
+
+    @params_as_tensors
+    def _build_predict_condensed(self, Xnew, full_cov=False, full_output_cov=False):
+        Xnew, input_idx = tf.unique(tf.reshape(Xnew, [-1]))
+        mu, var = conditional(tf.reshape(Xnew, [-1, 1]),
+                              self.feature, self.kern, self.q_mu,
+                              q_sqrt=self.q_sqrt, full_cov=full_cov,
+                              white=self.whiten,
+                              full_output_cov=full_output_cov)
+        mu = mu + self.mean_function(Xnew)
+        return mu, var, input_idx
 
 
 def generate_updates(N, G, K, L, T):
@@ -229,7 +265,7 @@ def generate_updates(N, G, K, L, T):
             weights[..., None], [K + 1, L, N, G, T]).reshape((K+1)*L, -1).T
 
     def update_assignments(m, X, Y, pi, psi, rho, Phi, Lambda, Gamma):
-        densities = m.expected_density(
+        densities = m.predict_density(
             X.reshape(-1, 1), Y.reshape(-1, 1)).T.reshape(K+1, L, N, G, T)
         for _ in range(10):
             Lambda_old = Lambda.copy()
@@ -263,8 +299,8 @@ def generate_updates(N, G, K, L, T):
                 densities[K] * Lambda.T[:, None, :, None], axis=(1, 2, 3))
             logGamma = logGamma + np.log(rho)
             Gamma = np.exp(logGamma - logsumexp(logGamma)[:, None])
-            Gamma = (Gamma + 0.01)
-            Gamma / Gamma.sum(axis=1)[:, None]
+            Gamma = (Gamma + 0.001)
+            Gamma = Gamma / Gamma.sum(axis=1)[:, None]
 
             if np.allclose(Lambda, Lambda_old):
                 break
