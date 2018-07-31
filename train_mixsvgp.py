@@ -27,7 +27,7 @@ L = 100
 T = n_samples
 
 minibatch_size = 10000
-
+grad_iters = 50
 
 model_path = out_dir + 'mixsvgp_K' + str(K) + '_L' + str(L) + '_' + model_id
 print(model_path)
@@ -64,14 +64,19 @@ minibatch_size = np.minimum(num_data, minibatch_size)
 
 X = x.reshape(-1, 1)[mask]
 Y = y.reshape(-1, 1)[mask]
+
 weights = compute_weights(Phi, Lambda, Gamma)
+_, weight_idx, = np.unique(
+    np.tile(np.arange(N * G).reshape(
+        (N, G))[:, :, None], T).reshape(-1, 1)[mask], return_inverse=True)
 
 # create model
 kernel = mk.SharedIndependentMok(gpflow.kernels.RBF(1), num_clusters)
 feature = mf.SharedIndependentMof(
     gpflow.features.InducingPoints(np.arange(T).astype(
         np.float64).reshape(-1, 1)))
-m = MixtureSVGP(X, Y, weights,
+
+m = MixtureSVGP(X, Y, weight_idx,
                 kern=kernel,
                 num_clusters=num_clusters, num_data=num_data,
                 likelihood=gpflow.likelihoods.Gaussian(),
@@ -79,14 +84,15 @@ m = MixtureSVGP(X, Y, weights,
 
 m.feature.feat.Z.trainable = False
 
+
 # optimize model parameters
 opt = gpflow.train.AdamOptimizer()
-opt.minimize(m, maxiter=int(100))
+opt.minimize(m, maxiter=grad_iters, feed_dict={m.weights: weights})
 
 out_path = 'model'
-elbos = [m.compute_log_likelihood()]
+elbos = [m.compute_log_likelihood(feed_dict={m.weights: weights})]
+
 for _ in range(n_iters):
-    print('!!!')
     # update assignments and mixture weights
     Phi, Lambda, Gamma = update_assignments(
         m, x, y, pi, psi, rho, Phi, Lambda, Gamma)
@@ -98,18 +104,18 @@ for _ in range(n_iters):
               'Phi': Phi, 'Lambda': Lambda, 'Gamma': Gamma}
 
     # recompute weights
-    weights = compute_weights(Phi, Lambda, Gamma)[mask]
+    weights = compute_weights(Phi, Lambda, Gamma)
 
     # reassign model data
-    m.X = X
-    m.Y = Y
-    m.weights = weights
-    elbos.append(m.compute_log_likelihood())
+    elbos.append(m.compute_log_likelihood(feed_dict={m.weights: weights}))
+    print(elbos[-1])
 
     # optimize gp parameters
     opt = gpflow.train.AdamOptimizer()
-    opt.minimize(m, maxiter=100)
-    elbos.append(m.compute_log_likelihood())
+    opt.minimize(m, maxiter=grad_iters, feed_dict={m.weights: weights})
+    elbos.append(m.compute_log_likelihood(feed_dict={m.weights: weights}))
+    print(elbos[-1])
+
     # save model
     with open(model_path, 'wb') as f:
         pickle.dump([m.read_trainables(), params, elbos], f)

@@ -42,7 +42,7 @@ class MixtureSVGP(gpflow.models.GPModel):
       }
     """
 
-    def __init__(self, X, Y, weights, kern, likelihood,
+    def __init__(self, X, Y, weight_idx, kern, likelihood,
                  num_clusters,
                  feat=None,
                  mean_function=None,
@@ -70,14 +70,16 @@ class MixtureSVGP(gpflow.models.GPModel):
         - num_data is the total number of observations, default to X.shape[0]
           (relevant when feeding in external minibatches)
         """
+        num_weights = np.unique(weight_idx).size
+
         if minibatch_size is None:
             X = DataHolder(X)
             Y = DataHolder(Y)
-            weights = DataHolder(weights)
+            weight_idx = DataHolder(weight_idx)
         else:
             X = Minibatch(X, batch_size=minibatch_size, seed=0)
             Y = Minibatch(Y, batch_size=minibatch_size, seed=0)
-            weights = Minibatch(weights, batch_size=minibatch_size, seed=0)
+            weight_idx = Minibatch(weight_idx, batch_size=minibatch_size, seed=0)
 
         # init the super class, accept args
         GPModel.__init__(self, X, Y, kern, likelihood,
@@ -90,7 +92,8 @@ class MixtureSVGP(gpflow.models.GPModel):
         # init variational parameters
         num_inducing = len(self.feature)
         self._init_variational_parameters(num_inducing, q_mu, q_sqrt, q_diag)
-        self.weights = weights
+        self.weight_idx = weight_idx
+        self.weights = tf.placeholder(tf.float64, [num_weights, num_clusters])
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -210,7 +213,7 @@ class MixtureSVGP(gpflow.models.GPModel):
             tf.shape(self.X)[0], settings.float_type)
 
         # weights = self._compute_weights()
-        return tf.reduce_sum(var_exp * self.weights) * scale - KL
+        return tf.reduce_sum(var_exp * tf.gather(self.weights, self.weight_idx)) * scale - KL
 
     @gpflow.autoflow((settings.float_type, [None, None]),
                      (settings.float_type, [None, None]))
@@ -244,7 +247,8 @@ class MixtureSVGP(gpflow.models.GPModel):
         return mu, var
 
     @params_as_tensors
-    def _build_predict_condensed(self, Xnew, full_cov=False, full_output_cov=False):
+    def _build_predict_condensed(
+            self, Xnew, full_cov=False, full_output_cov=False):
         Xnew, input_idx = tf.unique(tf.reshape(Xnew, [-1]))
         mu, var = conditional(tf.reshape(Xnew, [-1, 1]),
                               self.feature, self.kern, self.q_mu,
@@ -262,7 +266,7 @@ def generate_updates(N, G, K, L, T):
             'na,gl->alng', np.ones(N).reshape(-1, 1), Lambda * Gamma[:, 1])
         weights = np.concatenate([local_weights, global_weights])
         return np.broadcast_to(
-            weights[..., None], [K + 1, L, N, G, T]).reshape((K+1)*L, -1).T
+            weights[..., None], [K + 1, L, N, G, 1]).reshape((K+1)*L, -1).T
 
     def update_assignments(m, X, Y, pi, psi, rho, Phi, Lambda, Gamma):
         densities = m.predict_density(
