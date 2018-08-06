@@ -27,6 +27,8 @@ from gpflow.models.model import GPModel
 from gpflow.params import DataHolder
 from gpflow.params import Minibatch
 from gpflow.params import Parameter
+from gpflow.decors import name_scope
+from gpflow.logdensities import multivariate_normal
 
 
 class MixtureSVGP(gpflow.models.GPModel):
@@ -93,7 +95,8 @@ class MixtureSVGP(gpflow.models.GPModel):
         num_inducing = len(self.feature)
         self._init_variational_parameters(num_inducing, q_mu, q_sqrt, q_diag)
         self.weight_idx = weight_idx
-        self.weights = tf.placeholder(tf.float64, [num_weights, num_clusters])
+        self.weights = Parameter(np.ones((num_weights, num_clusters)),
+                                 name='weights')
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -234,16 +237,15 @@ class MixtureSVGP(gpflow.models.GPModel):
 
     @params_as_tensors
     def _build_predict(self, Xnew, full_cov=False, full_output_cov=False):
-        Xnew, input_idx = tf.unique(tf.reshape(Xnew, [-1]))
+        # Xnew, input_idx = tf.unique(tf.reshape(Xnew, [-1]))
         mu, var = conditional(tf.reshape(Xnew, [-1, 1]),
                               self.feature, self.kern, self.q_mu,
                               q_sqrt=self.q_sqrt, full_cov=full_cov,
                               white=self.whiten,
                               full_output_cov=full_output_cov)
-        mu = mu + self.mean_function(Xnew)
-
-        mu = tf.gather(mu, input_idx, axis=0)
-        var = tf.gather(var, input_idx, axis=0)
+        mu = mu + self.mean_function(tf.reshape(Xnew, [-1, 1]))
+        #mu = tf.gather(mu, input_idx, axis=1)
+        #var = tf.gather(var, input_idx, axis=1)
         return mu, var
 
     @params_as_tensors
@@ -257,6 +259,57 @@ class MixtureSVGP(gpflow.models.GPModel):
                               full_output_cov=full_output_cov)
         mu = mu + self.mean_function(Xnew)
         return mu, var, input_idx
+
+
+class WeightedGPR(GPModel):
+    """
+    Exact Weighted GPR, use when at a small number of input points
+    NOTE: This likelihood is proportional to full GPR for estimating mean
+    but training likelihood on this is not correct.
+    """
+    def __init__(self, X, Y, weight_idx, weight, kern, mean_function=None, **kwargs):
+        """
+        X is a data matrix, size N x D
+        Y is a data matrix, size N x R
+        kern, mean_function are appropriate GPflow objects
+        """
+        likelihood = gpflow.likelihoods.Gaussian()
+        Xunique, idx = tf.unique(X)
+        Y = tf.dynamic_partition
+        X = DataHolder(X)
+        Y = DataHolder(Y)
+        weight_idx = DataHolder(weight_idx)
+        GPModel.__init__(self, X, Y, kern, likelihood, mean_function, **kwargs)
+
+    @name_scope('likelihood')
+    @params_as_tensors
+    def _build_likelihood(self):
+        """
+        Construct a tensorflow function to compute the likelihood.
+            \log p(Y | theta).
+        """
+        K = self.kern.K(self.X) + tf.eye(tf.shape(self.X)[0], dtype=settings.float_type) * self.likelihood.variance
+        L = tf.cholesky(K)
+        m = self.mean_function(self.X)
+        logpdf = multivariate_normal(self.Y, m, L)  # (R,) log-likelihoods for each independent dimension of Y
+
+        return tf.reduce_sum(logpdf)
+
+    @name_scope('predict')
+    @params_as_tensors
+    def _build_predict(self, Xnew, full_cov=False):
+        """
+        Xnew is a data matrix, point at which we want to predict
+        This method computes
+            p(F* | Y )
+        where F* are points on the GP at Xnew, Y are noisy observations at X.
+        """
+        y = self.Y - self.mean_function(self.X)
+        Kmn = self.kern.K(self.X, Xnew)
+        Kmm_sigma = self.kern.K(self.X) + tf.eye(tf.shape(self.X)[0], dtype=settings.float_type) * self.likelihood.variance
+        Knn = self.kern.K(Xnew) if full_cov else self.kern.Kdiag(Xnew)
+        f_mean, f_var = base_conditional(Kmn, Kmm_sigma, Knn, y, full_cov=full_cov, white=False)  # N x P, N x P or P x N x N
+        return f_mean + self.mean_function(Xnew), f_var
 
 
 def generate_updates(N, G, K, L, T):
