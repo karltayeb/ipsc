@@ -93,7 +93,10 @@ class MixtureSVGP(gpflow.models.GPModel):
         num_inducing = len(self.feature)
         self._init_variational_parameters(num_inducing, q_mu, q_sqrt, q_diag)
         self.weight_idx = weight_idx
-        self.weights = tf.placeholder(tf.float64, [num_weights, num_clusters])
+
+        # weights set externally
+        self.weights = Parameter(np.ones((num_weights, num_clusters)),
+                                 trainable=False)
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -213,7 +216,8 @@ class MixtureSVGP(gpflow.models.GPModel):
             tf.shape(self.X)[0], settings.float_type)
 
         # weights = self._compute_weights()
-        return tf.reduce_sum(var_exp * tf.gather(self.weights, self.weight_idx)) * scale - KL
+        return tf.reduce_sum(
+            var_exp * tf.gather(self.weights, self.weight_idx)) * scale - KL
 
     @gpflow.autoflow((settings.float_type, [None, None]),
                      (settings.float_type, [None, None]))
@@ -259,18 +263,73 @@ class MixtureSVGP(gpflow.models.GPModel):
         return mu, var, input_idx
 
 
-def generate_updates(N, G, K, L, T):
-    def compute_weights(Phi, Lambda, Gamma):
-        local_weights = np.einsum('nk,gl->klng', Phi, Lambda * Gamma[:, 0])
-        global_weights = np.einsum(
-            'na,gl->alng', np.ones(N).reshape(-1, 1), Lambda * Gamma[:, 1])
-        weights = np.concatenate([local_weights, global_weights])
-        return np.broadcast_to(
-            weights[..., None], [K + 1, L, N, G, 1]).reshape((K+1)*L, -1).T
+def generate_updates(N, G, K, L, T, global_trajectories=True):
+    def compute_weights(Phi, Lambda, Gamma=None):
+        if Gamma is None:
+            Gamma = np.ones((L, 2))
+            Gamma[:, 1] = 0
+
+        weights = np.einsum('nk,gl->klng', Phi, Lambda * Gamma[:, 0])
+        if global_trajectories:
+            global_weights = np.einsum(
+                'na,gl->alng', np.ones(N).reshape(-1, 1), Lambda * Gamma[:, 1])
+            weights = np.concatenate([weights, global_weights])
+            weights = weights.reshape(K*L + L, -1).T
+        else:
+            weights = weights.reshape(K*L, -1).T
+        return weights
 
     def update_assignments(m, X, Y, pi, psi, rho, Phi, Lambda, Gamma):
-        densities = m.predict_density(
-            X.reshape(-1, 1), Y.reshape(-1, 1)).T.reshape(K+1, L, N, G, T)
+        """
+        BE AWARE X and Y are the full data with NANS (DONT MASK)
+        """
+        if global_trajectories:
+            Phi, Lambda, Gamma = _update_assignments_global(
+                m, X, Y, pi, psi, rho, Phi, Lambda, Gamma)
+
+        else:
+            Phi, Lambda = _update_assignments(
+                m, X, Y, pi, psi, Phi, Lambda)
+            Gamma = np.ones((L, 2))
+            Gamma[:, 1] = 0
+        return Phi, Lambda, Gamma
+
+    def _update_assignments(m, X, Y, pi, psi, Phi, Lambda):
+        """
+        BE AWARE X and Y are the full data with NANS (DONT MASK)
+        """
+        densities = m.predict_density(X.reshape(-1, 1), Y.reshape(-1, 1)).T
+        densities = densities.reshape(K, L, N, G, T)
+
+        for _ in range(10):
+            Lambda_old = Lambda.copy()
+
+            # sample assignment update
+            logPhi = np.nansum(densities[:K]
+                               * Lambda.T[None, :, None, :, None],
+                               axis=(1, 3, 4)).T + np.log(pi)
+
+            Phi = np.exp(logPhi - logsumexp(logPhi)[:, None])
+
+            # gene assignment update
+            logLambda = np.nansum(densities[:K]
+                                  * Phi.T[:, None, :, None, None],
+                                  axis=(0, 2, 4)).T
+            logLambda = logLambda + np.log(psi)
+            Lambda = np.exp(logLambda - logsumexp(logLambda)[:, None])
+
+            # local/global gene cluster
+            if np.allclose(Lambda, Lambda_old):
+                break
+            return Phi, Lambda
+
+    def _update_assignments_global(m, X, Y, pi, psi, rho, Phi, Lambda, Gamma):
+        """
+        BE AWARE X and Y are the full data with NANS (DONT MASK)
+        """
+        densities = m.predict_density(X.reshape(-1, 1), Y.reshape(-1, 1)).T
+        densities = densities.reshape(K+1, L, N, G, T)
+
         for _ in range(10):
             Lambda_old = Lambda.copy()
 
@@ -308,7 +367,7 @@ def generate_updates(N, G, K, L, T):
 
             if np.allclose(Lambda, Lambda_old):
                 break
-        return Phi, Lambda, Gamma
+            return Phi, Lambda, Gamma
 
     return compute_weights, update_assignments
 
