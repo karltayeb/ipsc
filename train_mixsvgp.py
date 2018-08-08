@@ -3,119 +3,121 @@ import gpflow
 import gpflow.multioutput.kernels as mk
 import gpflow.multioutput.features as mf
 from MixtureSVGP import MixtureSVGP, generate_updates
-import pickle
 from utils import load_data
 import sys
-import os
+from actions import train_mixsvgp, Assignments
 
-out_dir = sys.argv[1]
-model_id = sys.argv[2]
 
-if not os.path.exists(out_dir):
-    os.makedirs(out_dir)
+K = int(sys.argv[1])
+L = int(sys.argv[2])
+global_trajectories = bool(int(sys.argv[3]))
+save_path = sys.argv[4]
 
-n_iters = 10
-normalized_data_df, x, data_dict = load_data(
+n_iter = 100
+minibatch_size = 1000
+
+
+#############
+# load data #
+#############
+
+normalized_data_df, y, data_dict = load_data(
     'data/quantile_normalized_no_projection.txt')
-n_lines, n_samples, n_genes = x.shape
-y = x.transpose(0, 2, 1)
+y = y.transpose(0, 2, 1).astype(np.float64)
 
-N = n_lines
-G = n_genes
-K = 3
-L = 100
-T = n_samples
+N, G, T = y.shape
 
-minibatch_size = 10000
-grad_iters = 50
+G = 1000
 
-model_path = out_dir + 'mixsvgp_K' + str(K) + '_L' + str(L) + '_' + model_id
-print(model_path)
-y = y[:N, :G, :]
-x = np.tile(np.arange(T).astype(np.float64), (N, G, 1))
+y = y[:N, :G, :T].transpose(2, 0, 1)
+x = np.tile(np.arange(T).astype(np.float64)[:, None, None], (1, N, G))
 
-
-# initialize mixture weights
-pi = np.ones(K) / K
-psi = np.ones(L) / L
-rho = np.array([0.1, 0.9])
-
-# initialize assignments
-Phi = np.zeros((N, K))
-assignments = np.random.choice(K, N)
-for k in range(K):
-    Phi[assignments == k, k] = 1.0
-
-Lambda = np.zeros((G, L))
-assignments = np.random.choice(L, G)
-for l in range(L):
-    Lambda[assignments == l, l] = 1.0
-
-Gamma = np.tile(np.array([0.3, 0.7]), (L, 1))
-
-
-# create update functions
-compute_weights, update_assignments = generate_updates(N, G, K, L, T)
-
-mask = ~np.isnan(y.reshape(-1, 1)).squeeze()
-num_data = mask.sum()
-num_clusters = K * L + L
-minibatch_size = np.minimum(num_data, minibatch_size)
-
+mask = ~np.isnan(y.flatten())
 X = x.reshape(-1, 1)[mask]
 Y = y.reshape(-1, 1)[mask]
+_, weight_idx = np.unique(
+    np.tile(np.arange((N*G)).reshape((N, G))[None, :, :],
+            (T, 1, 1)).flatten()[mask], return_inverse=True)
 
-weights = compute_weights(Phi, Lambda, Gamma)
-_, weight_idx, = np.unique(
-    np.tile(np.arange(N * G).reshape(
-        (N, G))[:, :, None], T).reshape(-1, 1)[mask], return_inverse=True)
+###############
+# Make models #
+###############
 
-# create model
+# gp objects
+if global_trajectories:
+    num_clusters = K * L + L
+else:
+    num_clusters = K * L
+
 kernel = mk.SharedIndependentMok(gpflow.kernels.RBF(1), num_clusters)
 feature = mf.SharedIndependentMof(
     gpflow.features.InducingPoints(np.arange(T).astype(
         np.float64).reshape(-1, 1)))
+likelihood = gpflow.likelihoods.Gaussian()
 
-m = MixtureSVGP(X, Y, weight_idx,
-                kern=kernel,
-                num_clusters=num_clusters, num_data=num_data,
-                likelihood=gpflow.likelihoods.Gaussian(),
-                feat=feature, minibatch_size=minibatch_size)
+# model -- for hyperparameter learning
+with gpflow.defer_build():
+    m = MixtureSVGP(X, Y, weight_idx,
+                    kern=kernel,
+                    num_clusters=num_clusters, num_data=X.shape[0],
+                    likelihood=likelihood,
+                    feat=feature, minibatch_size=minibatch_size)
 
-m.feature.feat.Z.trainable = False
+    # only train hyperparams
+    for param in m.parameters:
+        param.trainable = False
 
+# mean model -- for trajectory learning
+# data are dummies, they'll be swapped out, just make correct shape
+XB = np.arange(np.unique(X).size)[:, None].astype(np.float64)
+YB = np.random.random([XB.shape[0], num_clusters]).astype(np.float64)
 
-# optimize model parameters
-opt = gpflow.train.AdamOptimizer()
-opt.minimize(m, maxiter=grad_iters, feed_dict={m.weights: weights})
+# put in model, weight_idx just arange because each observation unique
+with gpflow.defer_build():
+    m_bar = MixtureSVGP(XB, YB, np.arange(XB.size),
+                        kern=kernel,
+                        num_clusters=num_clusters, num_data=XB.shape[0],
+                        likelihood=likelihood,
+                        feat=feature, minibatch_size=None)
 
-out_path = 'model'
-elbos = [m.compute_log_likelihood(feed_dict={m.weights: weights})]
+    # fix all parameters except inducing outputs
+    for param in m_bar.parameters:
+        param.trainable = False
 
-for _ in range(n_iters):
-    # update assignments and mixture weights
-    Phi, Lambda, Gamma = update_assignments(
-        m, x, y, pi, psi, rho, Phi, Lambda, Gamma)
+    m_bar.q_mu.trainable = True
+    m_bar.q_sqrt.trainable = True
 
-    pi = Phi.sum(axis=0) / Phi.sum()
-    psi = Lambda.sum(axis=0) / Lambda.sum()
+m.q_mu = m_bar.q_mu
+m.q_sqrt = m_bar.q_sqrt
 
-    params = {'pi': pi, 'psi': psi, 'rho': rho,
-              'Phi': Phi, 'Lambda': Lambda, 'Gamma': Gamma}
+# compile models
+m.compile()
+m_bar.compile()
 
-    # recompute weights
-    weights = compute_weights(Phi, Lambda, Gamma)
+compute_weights, update_assignments = generate_updates(
+    N, G, K, L, T, global_trajectories)
 
-    # reassign model data
-    elbos.append(m.compute_log_likelihood(feed_dict={m.weights: weights}))
-    print(elbos[-1])
+pi = np.ones(K) / K
+psi = np.ones(L) / L
 
-    # optimize gp parameters
-    opt = gpflow.train.AdamOptimizer()
-    opt.minimize(m, maxiter=grad_iters, feed_dict={m.weights: weights})
-    elbos.append(m.compute_log_likelihood(feed_dict={m.weights: weights}))
-    print(elbos[-1])
+if global_trajectories:
+    rho = np.ones(2) / 2
+else:
+    rho = None
 
-    # save model
-    with open(model_path, 'wb') as f:
-        pickle.dump([m.read_trainables(), params, elbos], f)
+Phi = np.random.random((N, K))
+Phi = Phi / Phi.sum(1)[:, None]
+Lambda = np.random.random((G, L))
+Lambda = Lambda / Lambda.sum(1)[:, None]
+
+if global_trajectories:
+    Gamma = np.tile(np.array([0.5, 0.5])[None, :], (L, 1))
+else:
+    Gamma = None
+
+assignments = Assignments(pi, psi, rho, Phi, Lambda, Gamma)
+m.weights = compute_weights(Phi, Lambda, Gamma)
+
+logger = train_mixsvgp(m, m_bar, assignments, x, y,
+                       compute_weights, update_assignments,
+                       n_iter, save_path)
