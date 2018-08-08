@@ -27,8 +27,6 @@ from gpflow.models.model import GPModel
 from gpflow.params import DataHolder
 from gpflow.params import Minibatch
 from gpflow.params import Parameter
-from gpflow.decors import name_scope
-from gpflow.logdensities import multivariate_normal
 
 
 class MixtureSVGP(gpflow.models.GPModel):
@@ -95,8 +93,10 @@ class MixtureSVGP(gpflow.models.GPModel):
         num_inducing = len(self.feature)
         self._init_variational_parameters(num_inducing, q_mu, q_sqrt, q_diag)
         self.weight_idx = weight_idx
+
+        # weights set externally
         self.weights = Parameter(np.ones((num_weights, num_clusters)),
-                                 name='weights')
+                                 trainable=False)
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -216,7 +216,8 @@ class MixtureSVGP(gpflow.models.GPModel):
             tf.shape(self.X)[0], settings.float_type)
 
         # weights = self._compute_weights()
-        return tf.reduce_sum(var_exp * tf.gather(self.weights, self.weight_idx)) * scale - KL
+        return tf.reduce_sum(
+            var_exp * tf.gather(self.weights, self.weight_idx)) * scale - KL
 
     @gpflow.autoflow((settings.float_type, [None, None]),
                      (settings.float_type, [None, None]))
@@ -237,15 +238,15 @@ class MixtureSVGP(gpflow.models.GPModel):
 
     @params_as_tensors
     def _build_predict(self, Xnew, full_cov=False, full_output_cov=False):
-        # Xnew, input_idx = tf.unique(tf.reshape(Xnew, [-1]))
+        Xnew, input_idx = tf.unique(tf.reshape(Xnew, [-1]))
         mu, var = conditional(tf.reshape(Xnew, [-1, 1]),
                               self.feature, self.kern, self.q_mu,
                               q_sqrt=self.q_sqrt, full_cov=full_cov,
                               white=self.whiten,
                               full_output_cov=full_output_cov)
         mu = mu + self.mean_function(tf.reshape(Xnew, [-1, 1]))
-        #mu = tf.gather(mu, input_idx, axis=1)
-        #var = tf.gather(var, input_idx, axis=1)
+        mu = tf.gather(mu, input_idx, axis=0)
+        var = tf.gather(var, input_idx, axis=0)
         return mu, var
 
     @params_as_tensors
@@ -261,69 +262,73 @@ class MixtureSVGP(gpflow.models.GPModel):
         return mu, var, input_idx
 
 
-class WeightedGPR(GPModel):
-    """
-    Exact Weighted GPR, use when at a small number of input points
-    NOTE: This likelihood is proportional to full GPR for estimating mean
-    but training likelihood on this is not correct.
-    """
-    def __init__(self, X, Y, weight_idx, weight, kern, mean_function=None, **kwargs):
-        """
-        X is a data matrix, size N x D
-        Y is a data matrix, size N x R
-        kern, mean_function are appropriate GPflow objects
-        """
-        likelihood = gpflow.likelihoods.Gaussian()
-        Xunique, idx = tf.unique(X)
-        Y = tf.dynamic_partition
-        X = DataHolder(X)
-        Y = DataHolder(Y)
-        weight_idx = DataHolder(weight_idx)
-        GPModel.__init__(self, X, Y, kern, likelihood, mean_function, **kwargs)
+def generate_updates(N, G, K, L, T, global_trajectories=True):
+    def compute_weights(Phi, Lambda, Gamma=None):
+        if Gamma is None:
+            Gamma = np.ones((L, 2))
+            Gamma[:, 1] = 0
 
-    @name_scope('likelihood')
-    @params_as_tensors
-    def _build_likelihood(self):
-        """
-        Construct a tensorflow function to compute the likelihood.
-            \log p(Y | theta).
-        """
-        K = self.kern.K(self.X) + tf.eye(tf.shape(self.X)[0], dtype=settings.float_type) * self.likelihood.variance
-        L = tf.cholesky(K)
-        m = self.mean_function(self.X)
-        logpdf = multivariate_normal(self.Y, m, L)  # (R,) log-likelihoods for each independent dimension of Y
-
-        return tf.reduce_sum(logpdf)
-
-    @name_scope('predict')
-    @params_as_tensors
-    def _build_predict(self, Xnew, full_cov=False):
-        """
-        Xnew is a data matrix, point at which we want to predict
-        This method computes
-            p(F* | Y )
-        where F* are points on the GP at Xnew, Y are noisy observations at X.
-        """
-        y = self.Y - self.mean_function(self.X)
-        Kmn = self.kern.K(self.X, Xnew)
-        Kmm_sigma = self.kern.K(self.X) + tf.eye(tf.shape(self.X)[0], dtype=settings.float_type) * self.likelihood.variance
-        Knn = self.kern.K(Xnew) if full_cov else self.kern.Kdiag(Xnew)
-        f_mean, f_var = base_conditional(Kmn, Kmm_sigma, Knn, y, full_cov=full_cov, white=False)  # N x P, N x P or P x N x N
-        return f_mean + self.mean_function(Xnew), f_var
-
-
-def generate_updates(N, G, K, L, T):
-    def compute_weights(Phi, Lambda, Gamma):
-        local_weights = np.einsum('nk,gl->klng', Phi, Lambda * Gamma[:, 0])
-        global_weights = np.einsum(
-            'na,gl->alng', np.ones(N).reshape(-1, 1), Lambda * Gamma[:, 1])
-        weights = np.concatenate([local_weights, global_weights])
-        return np.broadcast_to(
-            weights[..., None], [K + 1, L, N, G, 1]).reshape((K+1)*L, -1).T
+        weights = np.einsum('nk,gl->klng', Phi, Lambda * Gamma[:, 0])
+        if global_trajectories:
+            global_weights = np.einsum(
+                'na,gl->alng', np.ones(N).reshape(-1, 1), Lambda * Gamma[:, 1])
+            weights = np.concatenate([weights, global_weights])
+            weights = weights.reshape(K*L + L, -1).T
+        else:
+            weights = weights.reshape(K*L, -1).T
+        return weights
 
     def update_assignments(m, X, Y, pi, psi, rho, Phi, Lambda, Gamma):
-        densities = m.predict_density(
-            X.reshape(-1, 1), Y.reshape(-1, 1)).T.reshape(K+1, L, N, G, T)
+        """
+        BE AWARE X and Y are the full data with NANS (DONT MASK)
+        """
+        if global_trajectories:
+            Phi, Lambda, Gamma = _update_assignments_global(
+                m, X, Y, pi, psi, rho, Phi, Lambda, Gamma)
+
+        else:
+            Phi, Lambda = _update_assignments(
+                m, X, Y, pi, psi, Phi, Lambda)
+            Gamma = np.ones((L, 2))
+            Gamma[:, 1] = 0
+        return Phi, Lambda, Gamma
+
+    def _update_assignments(m, X, Y, pi, psi, Phi, Lambda):
+        """
+        BE AWARE X and Y are the full data with NANS (DONT MASK)
+        """
+        densities = m.predict_density(X.reshape(-1, 1), Y.reshape(-1, 1)).T
+        densities = densities.reshape(K, L, N, G, T)
+
+        for _ in range(10):
+            Lambda_old = Lambda.copy()
+
+            # sample assignment update
+            logPhi = np.nansum(densities[:K]
+                               * Lambda.T[None, :, None, :, None],
+                               axis=(1, 3, 4)).T + np.log(pi)
+
+            Phi = np.exp(logPhi - logsumexp(logPhi)[:, None])
+
+            # gene assignment update
+            logLambda = np.nansum(densities[:K]
+                                  * Phi.T[:, None, :, None, None],
+                                  axis=(0, 2, 4)).T
+            logLambda = logLambda + np.log(psi)
+            Lambda = np.exp(logLambda - logsumexp(logLambda)[:, None])
+
+            # local/global gene cluster
+            if np.allclose(Lambda, Lambda_old):
+                break
+            return Phi, Lambda
+
+    def _update_assignments_global(m, X, Y, pi, psi, rho, Phi, Lambda, Gamma):
+        """
+        BE AWARE X and Y are the full data with NANS (DONT MASK)
+        """
+        densities = m.predict_density(X.reshape(-1, 1), Y.reshape(-1, 1)).T
+        densities = densities.reshape(K+1, L, N, G, T)
+
         for _ in range(10):
             Lambda_old = Lambda.copy()
 
@@ -361,7 +366,7 @@ def generate_updates(N, G, K, L, T):
 
             if np.allclose(Lambda, Lambda_old):
                 break
-        return Phi, Lambda, Gamma
+            return Phi, Lambda, Gamma
 
     return compute_weights, update_assignments
 
