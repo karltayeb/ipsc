@@ -14,6 +14,7 @@ class Logger(gpflow.actions.Action):
         if (ctx.iteration % 1) == 0:
             # update to be correct lower bound w/ assignment probs/entropys
             likelihood = - ctx.session.run(self.model.likelihood_tensor)
+            print(likelihood)
             self.logf.append(likelihood)
 
 
@@ -24,8 +25,9 @@ class Saver(gpflow.actions.Action):
         self.logger = logger
         self.save_path = save_path
 
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
+        save_dir = '/'.join(save_path.split('/')[:-1])
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
 
     def run(self, ctx):
         print('SAVING')
@@ -159,14 +161,14 @@ def evaluate(func, param_feed_dict):
 
 
 def train_mixsvgp(model, mean_model, assignments, x, y,
-                  compute_weights, update_assignments, iterations):
+                  compute_weights, update_assignments, iterations, save_path):
     logger = Logger(model)
     assignment_update = UpdateAssignments(
         model, mean_model, assignments, x, y,
         compute_weights, update_assignments)
     mean_update = UpdateMeans(model, mean_model)
     hyperparam_update = UpdateHyperparameters(model)
-    saver = Saver(model, assignments, logger, save_path='./model')
+    saver = Saver(model, assignments, logger, save_path)
 
     actions = [mean_update, hyperparam_update,
                assignment_update, logger, saver]
