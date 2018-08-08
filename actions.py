@@ -31,7 +31,12 @@ class Saver(gpflow.actions.Action):
 
     def run(self, ctx):
         print('SAVING')
-        model_params = self.model.read_values()
+
+        for param in self.model.parameters:
+            param.trainable = True
+        self.model.weights.trainable = False
+
+        model_params = self.model.read_trainables()
         with open(self.save_path, 'wb') as f:
             pickle.dump([model_params, self.assignments, self.logger.logf], f)
 
