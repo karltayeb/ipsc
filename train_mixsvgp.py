@@ -3,7 +3,7 @@ import gpflow
 import gpflow.multioutput.kernels as mk
 import gpflow.multioutput.features as mf
 from MixtureSVGP import MixtureSVGP, generate_updates
-from utils import load_data
+import pickle
 import sys
 from actions import train_mixsvgp, Assignments
 
@@ -21,27 +21,16 @@ minibatch_size = 1000
 # load data #
 #############
 
-normalized_data_df, y, data_dict = load_data(
-    'data/quantile_normalized_no_projection.txt')
-y = y.transpose(0, 2, 1).astype(np.float64)
-
-N, G, T = y.shape
-
-G = 1000
-
-y = y[:N, :G, :T].transpose(2, 0, 1)
-x = np.tile(np.arange(T).astype(np.float64)[:, None, None], (1, N, G))
-
-mask = ~np.isnan(y.flatten())
-X = x.reshape(-1, 1)[mask]
-Y = y.reshape(-1, 1)[mask]
-_, weight_idx = np.unique(
-    np.tile(np.arange((N*G)).reshape((N, G))[None, :, :],
-            (T, 1, 1)).flatten()[mask], return_inverse=True)
 
 ###############
 # Make models #
 ###############
+x, y, X, Y, weight_idx = pickle.load(
+    open('data/ipsc_data_pickle', 'rb'))
+
+assert(np.allclose(y[~np.isnan(y)] - Y.flatten(), 0))
+
+T, N, G = y.shape
 
 # gp objects
 if global_trajectories:
@@ -118,6 +107,7 @@ else:
 assignments = Assignments(pi, psi, rho, Phi, Lambda, Gamma)
 m.weights = compute_weights(Phi, Lambda, Gamma)
 
+print(Lambda.shape)
 logger = train_mixsvgp(m, m_bar, assignments, x, y,
                        compute_weights, update_assignments,
                        n_iter, save_path)
