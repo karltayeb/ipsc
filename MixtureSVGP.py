@@ -215,9 +215,8 @@ class MixtureSVGP(gpflow.models.GPModel):
         scale = tf.cast(self.num_data, settings.float_type) / tf.cast(
             tf.shape(self.X)[0], settings.float_type)
 
-        # weights = self._compute_weights()
         return tf.reduce_sum(
-            var_exp * tf.gather(self.weights, self.weight_idx)) * scale - KL
+            var_exp * tf.gather(self.weights, self.weight_idx)) * scale # - KL
 
     @gpflow.autoflow((settings.float_type, [None, None]),
                      (settings.float_type, [None, None]))

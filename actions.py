@@ -1,21 +1,55 @@
 import numpy as np
 import gpflow
 import os
-from MixtureSVGP import generate_updates
+import sys
 import pickle
+import copy
+import math
+from gpflow import params_as_tensors_for
 
 
 class Logger(gpflow.actions.Action):
-    def __init__(self, model):
+    def __init__(self, model, assignments):
         self.model = model
+        self.assignments = assignments
         self.logf = []
+        self.qmu = [np.zeros_like(model.q_mu.value)]
+        self.assignments_list = [copy.deepcopy(assignments)]
+        self.likelihood_params_list = [model.likelihood.read_values()]
+        self.kernel_params_list = [model.kern.read_values()]
 
     def run(self, ctx):
+        if (ctx.iteration % 10) == 0:
+            self.assignments_list.append(copy.deepcopy(self.assignments))
+            self.likelihood_params_list.append(
+                self.model.likelihood.read_values())
+            self.kernel_params_list.append(
+                self.model.kern.read_values())
+
         if (ctx.iteration % 1) == 0:
             # update to be correct lower bound w/ assignment probs/entropys
-            likelihood = - ctx.session.run(self.model.likelihood_tensor)
-            print(likelihood)
-            self.logf.append(likelihood)
+            # likelihood = ctx.session.run(self.model.likelihood_tensor)
+            likelihood = full_lml(self.model, self.model.X.size)
+            likelihood += (
+                (np.log(self.assignments.pi)
+                    * self.assignments.Phi).sum()
+                + (np.log(self.assignments.psi)
+                    * self.assignments.Lambda).sum()
+                + (np.log(self.assignments.rho)
+                    * self.assignments.Gamma).sum())
+
+            entropy = multinomial_entropy(self.assignments.Phi) + \
+                multinomial_entropy(self.assignments.Lambda) + \
+                multinomial_entropy(self.assignments.Gamma)
+
+            self.logf.append(entropy - likelihood)
+
+            if np.allclose(self.model.q_mu.value -
+                           self.qmu[-1], 0):
+                sys.exit()
+            else:
+                print(np.sum((self.model.q_mu.value - self.qmu[-1]) ** 2))
+                self.qmu.append(copy.deepcopy(self.model.q_mu.value))
 
 
 class Saver(gpflow.actions.Action):
@@ -38,7 +72,10 @@ class Saver(gpflow.actions.Action):
 
         model_params = self.model.read_trainables()
         with open(self.save_path, 'wb') as f:
-            pickle.dump([model_params, self.assignments, self.logger.logf], f)
+            pickle.dump([model_params, self.assignments,
+                         self.logger.logf, self.logger.likelihood_params_list,
+                         self.logger.kernel_params_list,
+                         self.logger.assignments_list], f)
 
 
 class UpdateAssignments(gpflow.actions.Action):
@@ -158,6 +195,26 @@ def make_feed(param, value):
     return {param.unconstrained_tensor: param.transform.backward(value)}
 
 
+def full_lml(model, batch_size):
+    with params_as_tensors_for(model):
+        tf_x, tf_y, tf_w = model.X, model.Y, model.weight_idx
+
+    lml = 0.0
+    num_batches = int(math.ceil(len(model.X._value) / batch_size))
+    for mb in range(num_batches):
+        start = mb * batch_size
+        finish = (mb + 1) * batch_size
+        x_mb = model.X._value[start:finish, :]
+        y_mb = model.Y._value[start:finish, :]
+        w_mb = model.weight_idx._value[start:finish]
+        mb_lml = model.compute_log_likelihood(
+            feed_dict={tf_x: x_mb, tf_y: y_mb, tf_w: w_mb})
+        lml += mb_lml * len(x_mb)
+
+    lml = lml / model.X._value.size
+    return lml
+
+
 def evaluate(func, param_feed_dict):
     tensor_feed_dict = {}
     for param, value in param_feed_dict.items():
@@ -165,9 +222,13 @@ def evaluate(func, param_feed_dict):
     return func(feed_dict=tensor_feed_dict)
 
 
+def multinomial_entropy(p):
+    return -1 * np.nansum(p * np.log(p))
+
+
 def train_mixsvgp(model, mean_model, assignments, x, y,
                   compute_weights, update_assignments, iterations, save_path):
-    logger = Logger(model)
+    logger = Logger(model, assignments)
     assignment_update = UpdateAssignments(
         model, mean_model, assignments, x, y,
         compute_weights, update_assignments)
