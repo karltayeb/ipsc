@@ -22,9 +22,9 @@ class Logger(gpflow.actions.Action):
         if (ctx.iteration % 10) == 0:
             self.assignments_list.append(copy.deepcopy(self.assignments))
             self.likelihood_params_list.append(
-                self.model.likelihood.read_values())
+                copy.deepcopy(self.model.likelihood.read_values()))
             self.kernel_params_list.append(
-                self.model.kern.read_values())
+                copy.deepcopy(self.model.kern.read_values()))
 
         if (ctx.iteration % 1) == 0:
             # update to be correct lower bound w/ assignment probs/entropys
