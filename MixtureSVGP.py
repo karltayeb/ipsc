@@ -43,7 +43,6 @@ class MixtureSVGP(gpflow.models.GPModel):
     """
 
     def __init__(self, X, Y, weight_idx, kern, likelihood,
-                 num_clusters,
                  feat=None,
                  mean_function=None,
                  num_latent=None,
@@ -83,7 +82,7 @@ class MixtureSVGP(gpflow.models.GPModel):
 
         # init the super class, accept args
         GPModel.__init__(self, X, Y, kern, likelihood,
-                         mean_function, num_latent=num_clusters, **kwargs)
+                         mean_function, num_latent=num_latent, **kwargs)
 
         self.num_data = num_data or X.shape[0]
         self.q_diag, self.whiten = q_diag, whiten
@@ -95,8 +94,7 @@ class MixtureSVGP(gpflow.models.GPModel):
         self.weight_idx = weight_idx
 
         # weights set externally
-        self.weights = Parameter(np.ones((num_weights, num_clusters)),
-                                 trainable=False)
+        self.weights = Parameter(np.ones((num_weights, num_latent)), trainable=False)
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -216,7 +214,7 @@ class MixtureSVGP(gpflow.models.GPModel):
             tf.shape(self.X)[0], settings.float_type)
 
         return tf.reduce_sum(
-            var_exp * tf.gather(self.weights, self.weight_idx)) * scale # - KL
+            var_exp * tf.gather(self.weights, self.weight_idx)) * scale - KL
 
     @gpflow.autoflow((settings.float_type, [None, None]),
                      (settings.float_type, [None, None]))

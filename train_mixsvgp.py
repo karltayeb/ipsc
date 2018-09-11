@@ -12,9 +12,10 @@ K = int(sys.argv[1])
 L = int(sys.argv[2])
 global_trajectories = bool(int(sys.argv[3]))
 save_path = sys.argv[4]
+num_genes = int(sys.argv[5])
 
-n_iter = 100
-minibatch_size = 1000
+n_iter = 50
+minibatch_size = 100
 
 
 #############
@@ -31,6 +32,15 @@ x, y, X, Y, weight_idx = pickle.load(
 assert(np.allclose(y[~np.isnan(y)] - Y.flatten(), 0))
 
 T, N, G = y.shape
+G = num_genes
+
+x = x[:, :, :num_genes]
+y = y[:, :, :num_genes]
+mask = ~np.isnan(y)
+
+Y = y[mask][:, None]
+X = x[mask][:, None]
+weight_idx = np.tile(np.arange(N*G).reshape(N, G)[None], (T, 1, 1))[mask]
 
 # gp objects
 if global_trajectories:
@@ -48,7 +58,7 @@ likelihood = gpflow.likelihoods.Gaussian()
 with gpflow.defer_build():
     m = MixtureSVGP(X, Y, weight_idx,
                     kern=kernel,
-                    num_clusters=num_clusters, num_data=X.shape[0],
+                    num_latent=num_clusters, num_data=X.shape[0],
                     likelihood=likelihood,
                     feat=feature, minibatch_size=minibatch_size)
 
@@ -65,7 +75,7 @@ YB = np.random.random([XB.shape[0], num_clusters]).astype(np.float64)
 with gpflow.defer_build():
     m_bar = MixtureSVGP(XB, YB, np.arange(XB.size),
                         kern=kernel,
-                        num_clusters=num_clusters, num_data=XB.shape[0],
+                        num_latent=num_clusters, num_data=XB.shape[0],
                         likelihood=likelihood,
                         feat=feature, minibatch_size=None)
 

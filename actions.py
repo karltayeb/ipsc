@@ -27,7 +27,7 @@ class Logger(gpflow.actions.Action):
                 copy.deepcopy(self.model.kern.read_values()))
 
         if (ctx.iteration % 1) == 0:
-            # update to be correct lower bound w/ assignment probs/entropys
+            # update to be correct lower bound w/ assignment probs/entropytras
             # likelihood = ctx.session.run(self.model.likelihood_tensor)
             likelihood = full_lml(self.model, self.model.X.size)
             likelihood += (
@@ -44,8 +44,7 @@ class Logger(gpflow.actions.Action):
 
             self.logf.append(entropy - likelihood)
 
-            if np.allclose(self.model.q_mu.value -
-                           self.qmu[-1], 0):
+            if np.allclose(self.model.q_mu.value - self.qmu[-1], 0):
                 sys.exit()
             else:
                 print(np.sum((self.model.q_mu.value - self.qmu[-1]) ** 2))
@@ -154,6 +153,42 @@ class UpdateMeans(gpflow.actions.Action):
         # evaluate(lambda **kwargs: opt.minimize(m_bar, **kwargs), feed_dict)
 
 
+class SetMeans(gpflow.actions.Action):
+    def __init__(self, model, mean_model):
+        self.model = model
+        self.mean_model = mean_model
+
+    def run(self, ctx):
+        print('UPDATING TRAJECTORIES')
+        # turn on trainables
+        X = self.model.X.value
+        Y = self.model.Y.value
+        weight_idx = self.model.weight_idx.value
+        weights = self.model.weights.value
+
+        # compress observations from main model
+        x_agg, time_index = np.unique(X, return_index=True)
+        wy_sums = np.array(
+            [np.sum(wy, axis=0) for wy in
+             np.split(weights[weight_idx] * Y, time_index[1:])])
+        w_agg = np.array(
+            [np.sum(w, axis=0) for w in
+             np.split(weights[weight_idx], time_index[1:])])
+        y_agg = wy_sums / w_agg
+
+        # set trainabels
+        for param in self.model.parameters:
+            param.trainable = False
+
+        self.mean_model.q_mu.trainable = True
+        self.mean_model.q_sqrt.trainable = True
+
+        # put new data in mean model
+        self.mean_model.X = x_agg[:, None]
+        self.mean_model.Y = y_agg
+        self.mean_model.weights = w_agg
+
+
 class UpdateHyperparameters(gpflow.actions.Action):
     def __init__(self, model):
         self.model = model
@@ -233,6 +268,13 @@ def train_mixsvgp(model, mean_model, assignments, x, y,
         model, mean_model, assignments, x, y,
         compute_weights, update_assignments)
     mean_update = UpdateMeans(model, mean_model)
+
+    #set_mean = SetMeans(model, mean_model)
+
+    #var_list = [(mean_model.q_mu, mean_model.q_sqrt)]
+    #natgrad = gpflow.train.NatGradOptimizer(1.0).make_optimize_action(
+    #    mean_model, var_list=var_list)
+
     hyperparam_update = UpdateHyperparameters(model)
     saver = Saver(model, assignments, logger, save_path)
 
