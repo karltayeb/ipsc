@@ -9,18 +9,17 @@ from gpflow import params_as_tensors_for
 
 
 class Logger(gpflow.actions.Action):
-    def __init__(self, model, assignments):
+    def __init__(self, model):
         self.model = model
-        self.assignments = assignments
         self.logf = []
         self.qmu = [np.zeros_like(model.q_mu.value)]
-        self.assignments_list = [copy.deepcopy(assignments)]
+        self.assignments_list = [copy.deepcopy(model.assignments)]
         self.likelihood_params_list = [model.likelihood.read_values()]
         self.kernel_params_list = [model.kern.read_values()]
 
     def run(self, ctx):
         if (ctx.iteration % 10) == 0:
-            self.assignments_list.append(copy.deepcopy(self.assignments))
+            self.assignments_list.append(copy.deepcopy(self.model.assignments))
             self.likelihood_params_list.append(
                 copy.deepcopy(self.model.likelihood.read_values()))
             self.kernel_params_list.append(
@@ -30,17 +29,8 @@ class Logger(gpflow.actions.Action):
             # update to be correct lower bound w/ assignment probs/entropytras
             # likelihood = ctx.session.run(self.model.likelihood_tensor)
             likelihood = full_lml(self.model, self.model.X.size)
-            likelihood += (
-                (np.log(self.assignments.pi)
-                    * self.assignments.Phi).sum()
-                + (np.log(self.assignments.psi)
-                    * self.assignments.Lambda).sum()
-                + (np.log(self.assignments.rho)
-                    * self.assignments.Gamma).sum())
-
-            entropy = multinomial_entropy(self.assignments.Phi) + \
-                multinomial_entropy(self.assignments.Lambda) + \
-                multinomial_entropy(self.assignments.Gamma)
+            likelihood += self.model.assignments.likelihood()
+            entropy = self.model.assignments.entropy()
 
             self.logf.append(entropy - likelihood)
 
@@ -52,9 +42,8 @@ class Logger(gpflow.actions.Action):
 
 
 class Saver(gpflow.actions.Action):
-    def __init__(self, model, assignments, logger, save_path='./model'):
+    def __init__(self, model, logger, save_path='./model'):
         self.model = model
-        self.assignments = assignments
         self.logger = logger
         self.save_path = save_path
 
@@ -67,49 +56,28 @@ class Saver(gpflow.actions.Action):
 
         for param in self.model.parameters:
             param.trainable = True
-        self.model.weights.trainable = False
+        # self.model.weights.trainable = False
 
         model_params = self.model.read_trainables()
         with open(self.save_path, 'wb') as f:
-            pickle.dump([model_params, self.assignments,
+            pickle.dump([model_params, self.model.assignments,
                          self.logger.logf, self.logger.likelihood_params_list,
                          self.logger.kernel_params_list,
                          self.logger.assignments_list], f)
 
 
 class UpdateAssignments(gpflow.actions.Action):
-    def __init__(self, model, mean_model, assignments, x, y,
-                 compute_weights, update_assignments):
+    def __init__(self, model, mean_model, x, y):
         self.model = model
-        self.assignments = assignments
         self.x = x
         self.y = y
-        self.compute_weights = compute_weights
-        self.update_assignments = update_assignments
 
     def run(self, ctx):
         print('UPDATING ASSIGNMENTS')
-        Phi, Lambda, Gamma = self.update_assignments(
+        self.model.assignments.update_assignments(
             self.model,
-            self.x.transpose(1, 2, 0), self.y.transpose(1, 2, 0),
-            self.assignments.pi, self.assignments.psi, self.assignments.rho,
-            self.assignments.Phi, self.assignments.Lambda,
-            self.assignments.Gamma)
-
-        self.assignments.Phi = Phi
-        self.assignments.Lambda = Lambda
-        self.assignments.Gamma = Gamma
-
-        self.assignments.pi = Phi.sum(axis=0) / Phi.sum()
-        self.assignments.psi = Lambda.sum(0) / Lambda.sum()
-
-        weights = self.compute_weights(
-            self.assignments.Phi,
-            self.assignments.Lambda,
-            self.assignments.Gamma
+            self.x.transpose(1, 2, 0), self.y.transpose(1, 2, 0)
         )
-
-        self.model.weights = weights
 
 
 class UpdateMeans(gpflow.actions.Action):
@@ -123,7 +91,7 @@ class UpdateMeans(gpflow.actions.Action):
         X = self.model.X.value
         Y = self.model.Y.value
         weight_idx = self.model.weight_idx.value
-        weights = self.model.weights.value
+        weights = self.model.assignments.compute_weights()
 
         # compress observations from main model
         x_agg, time_index = np.unique(X, return_index=True)
@@ -145,7 +113,8 @@ class UpdateMeans(gpflow.actions.Action):
         # put new data in mean model
         self.mean_model.X = x_agg[:, None]
         self.mean_model.Y = y_agg
-        self.mean_model.weights = w_agg
+
+        self.mean_model.assignments.compute_weights = lambda: w_agg
 
         # optimize with new data passed in
         opt = gpflow.train.ScipyOptimizer()
@@ -164,7 +133,7 @@ class SetMeans(gpflow.actions.Action):
         X = self.model.X.value
         Y = self.model.Y.value
         weight_idx = self.model.weight_idx.value
-        weights = self.model.weights.value
+        weights = self.model.assignments.compute_weights()
 
         # compress observations from main model
         x_agg, time_index = np.unique(X, return_index=True)
@@ -186,6 +155,11 @@ class SetMeans(gpflow.actions.Action):
         # put new data in mean model
         self.mean_model.X = x_agg[:, None]
         self.mean_model.Y = y_agg
+
+        def cw():
+            return w_agg
+
+        self.mean_model.assignments.compute_weights = cw
         self.mean_model.weights = w_agg
 
 
@@ -261,22 +235,13 @@ def multinomial_entropy(p):
     return -1 * np.nansum(p * np.log(p))
 
 
-def train_mixsvgp(model, mean_model, assignments, x, y,
-                  compute_weights, update_assignments, iterations, save_path):
-    logger = Logger(model, assignments)
+def train_mixsvgp(model, mean_model, x, y, iterations, save_path):
+    logger = Logger(model)
     assignment_update = UpdateAssignments(
-        model, mean_model, assignments, x, y,
-        compute_weights, update_assignments)
+        model, mean_model, x, y)
     mean_update = UpdateMeans(model, mean_model)
-
-    #set_mean = SetMeans(model, mean_model)
-
-    #var_list = [(mean_model.q_mu, mean_model.q_sqrt)]
-    #natgrad = gpflow.train.NatGradOptimizer(1.0).make_optimize_action(
-    #    mean_model, var_list=var_list)
-
     hyperparam_update = UpdateHyperparameters(model)
-    saver = Saver(model, assignments, logger, save_path)
+    saver = Saver(model, logger, save_path)
 
     actions = [mean_update, hyperparam_update,
                assignment_update, logger, saver]

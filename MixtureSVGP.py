@@ -27,6 +27,7 @@ from gpflow.models.model import GPModel
 from gpflow.params import DataHolder
 from gpflow.params import Minibatch
 from gpflow.params import Parameter
+from scipy.special import digamma
 
 
 class MixtureSVGP(gpflow.models.GPModel):
@@ -42,7 +43,7 @@ class MixtureSVGP(gpflow.models.GPModel):
       }
     """
 
-    def __init__(self, X, Y, weight_idx, kern, likelihood,
+    def __init__(self, X, Y, assignments, weight_idx, kern, likelihood,
                  feat=None,
                  mean_function=None,
                  num_latent=None,
@@ -94,7 +95,7 @@ class MixtureSVGP(gpflow.models.GPModel):
         self.weight_idx = weight_idx
 
         # weights set externally
-        self.weights = Parameter(np.ones((num_weights, num_latent)), trainable=False)
+        self.assignments = assignments
 
     def _init_variational_parameters(self, num_inducing, q_mu, q_sqrt, q_diag):
         """
@@ -214,7 +215,8 @@ class MixtureSVGP(gpflow.models.GPModel):
             tf.shape(self.X)[0], settings.float_type)
 
         return tf.reduce_sum(
-            var_exp * tf.gather(self.weights, self.weight_idx)) * scale - KL
+            var_exp * tf.gather(self.assignments.compute_weights(),
+                                self.weight_idx)) * scale - KL
 
     @gpflow.autoflow((settings.float_type, [None, None]),
                      (settings.float_type, [None, None]))
@@ -317,7 +319,57 @@ def generate_updates(N, G, K, L, T, global_trajectories=True):
             # local/global gene cluster
             if np.allclose(Lambda, Lambda_old):
                 break
+        return Phi, Lambda
+
+    def _update_assignments_dp(m, X, Y, pi, alpha, Phi, Lambda):
+        """
+        BE AWARE X and Y are the full data with NANS (DONT MASK)
+        """
+        densities = m.expected_density(X.reshape(-1, 1), Y.reshape(-1, 1)).T
+        densities = densities.reshape(K, L, N, G, T)
+
+        log_psi = _stick_breaking(alpha, Lambda)
+
+        for _ in range(10):
+            Lambda_old = Lambda.copy()
+
+            # sample assignment update
+            logPhi = np.nansum(densities[:K]
+                               * Lambda.T[None, :, None, :, None],
+                               axis=(1, 3, 4)).T + np.log(pi)
+
+            Phi = np.exp(logPhi - logsumexp(logPhi)[:, None])
+
+            # gene assignment update
+            logLambda = np.nansum(densities[:K]
+                                  * Phi.T[:, None, :, None, None],
+                                  axis=(0, 2, 4)).T
+            logLambda = logLambda + log_psi
+            Lambda = np.exp(logLambda - logsumexp(logLambda)[:, None])
+
+            # local/global gene cluster
+            if np.allclose(Lambda, Lambda_old):
+                break
             return Phi, Lambda
+
+    def _stick_breaking(alpha, Z):
+        """
+        return expected values of stick lengths
+        alpha concentration parameter
+        Z [N, T] expected assignments on truncated DP
+        """
+        alpha = Z.sum(0)
+        beta_alpha= np.flip(np.cumsum(np.flip(alpha, 0)), 0)
+
+        digamma_alpha = digamma(alpha)
+        digamma_beta = digamma(beta_alpha - alpha)
+        digamma_alpha_beta = digamma_alpha(beta_alpha)
+
+        lnv = digamma_alpha - digamma_alpha_beta
+        ln1_v = digamma_beta - digamma_alpha_beta
+
+        log_psi = lnv + np.cumsum(ln1_v) - ln1_v
+        return log_psi
 
     def _update_assignments_global(m, X, Y, pi, psi, rho, Phi, Lambda, Gamma):
         """
