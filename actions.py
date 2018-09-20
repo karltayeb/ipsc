@@ -269,12 +269,6 @@ def train_mixsvgp(model, mean_model, assignments, x, y,
         compute_weights, update_assignments)
     mean_update = UpdateMeans(model, mean_model)
 
-    #set_mean = SetMeans(model, mean_model)
-
-    #var_list = [(mean_model.q_mu, mean_model.q_sqrt)]
-    #natgrad = gpflow.train.NatGradOptimizer(1.0).make_optimize_action(
-    #    mean_model, var_list=var_list)
-
     hyperparam_update = UpdateHyperparameters(model)
     saver = Saver(model, assignments, logger, save_path)
 

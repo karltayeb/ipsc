@@ -181,14 +181,12 @@ class MixtureSVGP(gpflow.models.GPModel):
             ) * weight_parts[t]) for t in range(self.T)]) - KL
         fmean, fvar, idx = self._build_predict_condensed(
             self.X, full_cov=False, full_output_cov=False)
-
         likelihood = []
         for k in range(self.K):
             for l in range(self.L):
                 weights = self.Phi[:, k][None, :] *
                     self.Lambda[:, l][:, None] * self.Gamma[l, 0]
                 weights = tf.tile(weights[:, :, None], [1, 1, self.T])
-
                 mean = tf.gather(fmean[k * l + l], idx)
                 var = tf.gather(fmean[k * l + l], idx)
                 weights = tf.boolean_mask(
