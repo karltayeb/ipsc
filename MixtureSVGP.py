@@ -230,7 +230,6 @@ class MixtureSVGP(gpflow.models.GPModel):
         # Get variational expectations.
         var_exp = self.likelihood.variational_expectations(
             fmean, fvar, Ynew)
-
         return var_exp
 
     @params_as_tensors
