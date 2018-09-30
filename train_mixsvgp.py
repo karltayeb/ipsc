@@ -105,9 +105,9 @@ else:
     Gamma = None
 
 if global_trajectories:
-    assignments = GlobalAssignments(pi, psi, rho, Phi, Lambda, Gamma)
+    assignments = GlobalAssignments(pi, psi, rho, N, G, K, L, T)
 else:
-    assignments = Assignments(pi, psi, rho, Phi, Lambda, Gamma)
+    assignments = Assignments(pi, psi, rho, N, G, K, L, T)
 
 m.weights = assignments.compute_weights()
 logger = train_mixsvgp(m, m_bar, assignments, x, y,
