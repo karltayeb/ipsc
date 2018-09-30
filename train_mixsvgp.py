@@ -110,6 +110,4 @@ else:
     assignments = Assignments(pi, psi, rho, N, G, K, L, T)
 
 m.weights = assignments.compute_weights()
-logger = train_mixsvgp(m, m_bar, assignments, x, y,
-                       compute_weights, update_assignments,
-                       n_iter, save_path)
+logger = train_mixsvgp(m, m_bar, assignments, x, y, n_iter, save_path)
