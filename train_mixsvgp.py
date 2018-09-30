@@ -5,23 +5,20 @@ import gpflow.multioutput.features as mf
 from MixtureSVGP import MixtureSVGP, generate_updates
 import pickle
 import sys
-from actions import train_mixsvgp, Assignments
+from actions import train_mixsvgp
+from Assignments import Assignments, GlobalAssignments
 
 
 K = int(sys.argv[1])
 L = int(sys.argv[2])
-global_trajectories = bool(int(sys.argv[3]))
+alpha = float(sys.argv[3])
 save_path = sys.argv[4]
-num_genes = int(sys.argv[5])
 
-n_iter = 50
-minibatch_size = 100
+n_iter = 100
+minibatch_size = 1000
 
 
-#############
-# load data #
-#############
-
+global_trajectories = (alpha == 0)
 
 ###############
 # Make models #
@@ -32,10 +29,9 @@ x, y, X, Y, weight_idx = pickle.load(
 assert(np.allclose(y[~np.isnan(y)] - Y.flatten(), 0))
 
 T, N, G = y.shape
-G = num_genes
 
-x = x[:, :, :num_genes]
-y = y[:, :, :num_genes]
+x = x[:, :, :G]
+y = y[:, :, :G]
 mask = ~np.isnan(y)
 
 Y = y[mask][:, None]
@@ -93,16 +89,10 @@ m.q_sqrt = m_bar.q_sqrt
 m.compile()
 m_bar.compile()
 
-compute_weights, update_assignments = generate_updates(
-    N, G, K, L, T, global_trajectories)
 
 pi = np.ones(K) / K
 psi = np.ones(L) / L
-
-if global_trajectories:
-    rho = np.ones(2) / 2
-else:
-    rho = None
+rho = np.array([1 - alpha, alpha])
 
 Phi = np.random.random((N, K))
 Phi = Phi / Phi.sum(1)[:, None]
@@ -114,10 +104,12 @@ if global_trajectories:
 else:
     Gamma = None
 
-assignments = Assignments(pi, psi, rho, Phi, Lambda, Gamma)
-m.weights = compute_weights(Phi, Lambda, Gamma)
+if global_trajectories:
+    assignments = GlobalAssignments(pi, psi, rho, Phi, Lambda, Gamma)
+else:
+    assignments = Assignments(pi, psi, rho, Phi, Lambda, Gamma)
 
-print(Lambda.shape)
+m.weights = assignments.compute_weights()
 logger = train_mixsvgp(m, m_bar, assignments, x, y,
                        compute_weights, update_assignments,
                        n_iter, save_path)

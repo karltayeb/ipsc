@@ -18,7 +18,7 @@ class Assignments:
         Phi = np.random.random((N, K))
         self.Phi = Phi / Phi.sum(1)[:, None]
 
-        Lambda = np.random.choice(2, (G, L))
+        Lambda = np.random.rand(G, L)
         self.Lambda = Lambda / Lambda.sum(1)[:, None]
 
         Gamma = np.ones((Lambda.shape[1], 2))
@@ -85,11 +85,10 @@ class GlobalAssignments:
         Phi = np.random.random((N, K))
         self.Phi = Phi / Phi.sum(1)[:, None]
 
-        Lambda = np.random.choice(2, (G, L))
+        Lambda = np.random.rand(G, L)
         self.Lambda = Lambda / Lambda.sum(1)[:, None]
 
-        Gamma = np.ones((Lambda.shape[1], 2))
-        Gamma[:, 1] = 0
+        Gamma = np.ones((Lambda.shape[1], 2)) / 2
         self.Gamma = Gamma
 
     def likelihood(self):
@@ -105,11 +104,13 @@ class GlobalAssignments:
     def compute_weights(self):
         weights = np.einsum('nk,gl->klng', self.Phi,
                             self.Lambda * self.Gamma[:, 0])
+        weights = weights.reshape(self.K * self.L, -1).T
+
         global_weights = np.einsum(
             'na,gl->alng', np.ones(self.N).reshape(-1, 1),
             self.Lambda * self.Gamma[:, 1])
-        weights = np.concatenate([weights, global_weights])
-        weights = weights.reshape(self.K * self.L + self.L, -1).T
+        global_weights = global_weights.reshape(self.L, -1).T
+        weights = np.concatenate([weights, global_weights], 1)
         return weights
 
     def update_assignments(self, m, X, Y):
@@ -124,35 +125,35 @@ class GlobalAssignments:
 
             # sample assignment update
             logPhi = np.nansum(densities[:self.K]
-                               * self.Lambda.T[None, :, None, :, None],
+                               * self.Lambda.T[None, :, None, :, None]
+                               * self.Gamma[:, 0][None, :, None, None, None],
                                axis=(1, 3, 4)).T + np.log(self.pi)
 
             self.Phi = np.exp(logPhi - logsumexp(logPhi)[:, None])
 
             # gene assignment update
             logLambda = np.nansum(densities[:self.K]
-                                  * self.Phi.T[:, None, :, None, None],
+                                  * self.Phi.T[:, None, :, None, None]
+                                  * self.Gamma[:, 0][None, :, None, None, None],
                                   axis=(0, 2, 4)).T
-
             logLambda = logLambda + np.nansum(
                 densities[self.K] * self.Gamma[:, 1][:, None, None, None],
                 axis=(1, 3)).T
-
             logLambda = logLambda + np.log(self.psi)
             self.Lambda = np.exp(logLambda - logsumexp(logLambda)[:, None])
 
-            # local/global gene cluste
+            # local/global gene cluster
             logGamma = np.zeros((self.L, 2))
-
             logGamma[:, 0] = np.nansum(
                 densities[:self.K] * self.Phi.T[:, None, :, None, None]
                 * self.Lambda.T[None, :, None, :, None], axis=(0, 2, 3, 4))
 
             logGamma[:, 1] = np.nansum(
-                densities[self.K] * self.Lambda.T[:, None, :, None],
-                axis=(1, 2, 3))
+                densities[self.K] * self.Lambda.T[:, None, :, None], axis=(1, 2, 3))
             logGamma = logGamma + np.log(self.rho)
-            self.Gamma = np.exp(logGamma - logsumexp(logGamma)[:, None])
+            Gamma = np.exp(logGamma - logsumexp(logGamma)[:, None])
+            Gamma = (Gamma + 0.001)
+            self.Gamma = Gamma / Gamma.sum(axis=1)[:, None]
 
             # local/global gene cluster
             if np.allclose(self.Lambda, Lambda_old):
